@@ -29850,15 +29850,19 @@ static void ds4_sidecar_block(uint32_t *nt, uint32_t stage) {
 }
 
 /* mode: 0 canonical markov_w1/w2, 1 published embed/head alternates,
- * 2 no markov tensors (refuse), 3 no dspark.target_architecture key. */
+ * 2 no markov tensors (refuse), 3 no dspark.target_architecture key,
+ * 4 the ACTUAL artifact combination (no family key + alternates + real
+ * types + real noise id, 81-tensor directory), 5 alternates with wrong
+ * dimensions (refuse), 6 both variants present with wrong-dimension
+ * alternates (canonical must win). */
 static void ds4_test_dspark_sidecar_model(ds4_model *m, int mode) {
     uint32_t nkv = 0, nt = 0;
     ds4_sidecar_map_len = 0;
     ds4_sidecar_meta_str(&nkv, "general.architecture", "deepseek41-dspark");
-    if (mode != 3) ds4_sidecar_meta_str(&nkv, "dspark.target_architecture", "deepseek41");
+    if (mode != 3 && mode != 4) ds4_sidecar_meta_str(&nkv, "dspark.target_architecture", "deepseek41");
     ds4_sidecar_meta_u32(&nkv, "dspark.block_size", 5);
     ds4_sidecar_meta_u32(&nkv, "dspark.markov_rank", 256);
-    ds4_sidecar_meta_u32(&nkv, "dspark.noise_token_id", 1);
+    ds4_sidecar_meta_u32(&nkv, "dspark.noise_token_id", 128799); /* artifact value */
     ds4_sidecar_meta_u32(&nkv, "dspark.n_routed_experts", 128);
     ds4_sidecar_meta_u32(&nkv, "dspark.num_experts_per_tok", 3);
     ds4_sidecar_meta_u32x3(&nkv, "dspark.target_layer_ids", 37, 38, 39);
@@ -29870,13 +29874,25 @@ static void ds4_test_dspark_sidecar_model(ds4_model *m, int mode) {
     ds4_sidecar_tensor(&nt, "mtp.0.main_norm.weight", DS4_TENSOR_F32, 1, d);
     ds4_sidecar_tensor(&nt, "mtp.2.norm.weight", DS4_TENSOR_F32, 1, d);
     if (mode != 2) {
+        const bool aliases = mode == 1 || mode == 4 || mode == 5 || mode == 6;
         d[0] = 256; d[1] = DS4_N_VOCAB;
-        ds4_sidecar_tensor(&nt, mode == 1 ? "mtp.2.markov_head.embed.weight"
-                                          : "mtp.2.markov_head.markov_w1.weight",
-                           DS4_TENSOR_F16, 2, d);
-        ds4_sidecar_tensor(&nt, mode == 1 ? "mtp.2.markov_head.head.weight"
-                                          : "mtp.2.markov_head.markov_w2.weight",
-                           DS4_TENSOR_F16, 2, d);
+        if (!aliases || mode == 6) {
+            ds4_sidecar_tensor(&nt, "mtp.2.markov_head.markov_w1.weight",
+                               DS4_TENSOR_F16, 2, d);
+            ds4_sidecar_tensor(&nt, "mtp.2.markov_head.markov_w2.weight",
+                               DS4_TENSOR_F16, 2, d);
+        }
+        if (aliases) {
+            /* Mode 5 carries wrong alternate dimensions and must refuse;
+             * mode 6 carries wrong-dimension alternates BESIDE correct
+             * canonical tensors and must bind the canonical pair. */
+            uint64_t ad[2] = {256, DS4_N_VOCAB};
+            if (mode == 5 || mode == 6) ad[0] = 255;
+            ds4_sidecar_tensor(&nt, "mtp.2.markov_head.embed.weight",
+                               DS4_TENSOR_F16, 2, ad);
+            ds4_sidecar_tensor(&nt, "mtp.2.markov_head.head.weight",
+                               DS4_TENSOR_F16, 2, ad);
+        }
     }
     d[0] = (uint64_t)DS4_N_EMBD + 256; d[1] = 1;
     ds4_sidecar_tensor(&nt, "mtp.2.confidence_head.proj.weight", DS4_TENSOR_F32, 2, d);
@@ -29887,6 +29903,16 @@ static void ds4_test_dspark_sidecar_model(ds4_model *m, int mode) {
     m->n_tensors = nt;
     m->kv = ds4_sidecar_kv;
     m->tensors = ds4_sidecar_tensors;
+}
+
+/* Directory size for a mode: 25 per stage plus the fixed extras plus
+ * the mode-dependent markov entries. Mirrors the published artifact's
+ * 81-tensor count in the actual-combination mode. */
+static int ds4_sidecar_directory_size(int mode) {
+    int n = 3 * 25 + 2 + 1 + 1; /* blocks + main_* + norm + confidence */
+    if (mode == 2) return n;
+    if (mode == 6) return n + 4; /* canonical pair + alternate pair */
+    return n + 2;
 }
 
 static int ds4_test_dspark_sidecar_defects(int mode, bool *family_ok) {
@@ -29914,7 +29940,18 @@ bool ds4_test_dspark_v41_sidecar_naming(void) {
         /* Missing markov tensors refuse (missing_tensors > 0). */
         ds4_test_dspark_sidecar_defects(2, &family_ok) > 0 && family_ok &&
         /* Missing family key accepted by this branch (#1299). */
-        ds4_test_dspark_sidecar_defects(3, &family_ok) == 0 && family_ok;
+        ds4_test_dspark_sidecar_defects(3, &family_ok) == 0 && family_ok &&
+        /* The ACTUAL artifact combination binds cleanly: no family key,
+         * alternate names, real types, real noise id, and exactly the
+         * published 81-tensor directory. */
+        ds4_test_dspark_sidecar_defects(4, &family_ok) == 0 && family_ok &&
+        ds4_sidecar_directory_size(4) == 81 &&
+        /* Wrong alternate dimensions refuse (invalid_tensors > 0). */
+        ds4_test_dspark_sidecar_defects(5, &family_ok) > 0 && family_ok &&
+        /* Both variants present with wrong-dimension alternates: the
+         * canonical pair must be chosen (binding the alternates would
+         * trip invalid_tensors). */
+        ds4_test_dspark_sidecar_defects(6, &family_ok) == 0 && family_ok;
     g_ds4_shape = saved;
     return ok;
 }
