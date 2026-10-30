@@ -29745,7 +29745,7 @@ static uint64_t ds4_sidecar_put(const void *data, uint64_t n) {
 
 static void ds4_sidecar_meta_str(uint32_t *nkv, const char *k, const char *v) {
     ds4_kv *kv = &ds4_sidecar_kv[(*nkv)++];
-    kv->key.ptr = (const uint8_t *)k;
+    kv->key.ptr = k;
     kv->key.len = strlen(k);
     kv->type = 8; /* GGUF string */
     uint8_t buf[8];
@@ -29758,7 +29758,7 @@ static void ds4_sidecar_meta_str(uint32_t *nkv, const char *k, const char *v) {
 
 static void ds4_sidecar_meta_u32(uint32_t *nkv, const char *k, uint32_t v) {
     ds4_kv *kv = &ds4_sidecar_kv[(*nkv)++];
-    kv->key.ptr = (const uint8_t *)k;
+    kv->key.ptr = k;
     kv->key.len = strlen(k);
     kv->type = 4;
     kv->value_pos = ds4_sidecar_put(&v, 4);
@@ -29766,7 +29766,7 @@ static void ds4_sidecar_meta_u32(uint32_t *nkv, const char *k, uint32_t v) {
 
 static void ds4_sidecar_meta_u32x3(uint32_t *nkv, const char *k, uint32_t a, uint32_t b, uint32_t c) {
     ds4_kv *kv = &ds4_sidecar_kv[(*nkv)++];
-    kv->key.ptr = (const uint8_t *)k;
+    kv->key.ptr = k;
     kv->key.len = strlen(k);
     kv->type = 9; /* array */
     uint8_t buf[12];
@@ -29784,7 +29784,7 @@ static void ds4_sidecar_tensor(uint32_t *nt, const char *name, uint32_t type,
                                uint32_t ndim, const uint64_t *dim) {
     ds4_tensor *t = &ds4_sidecar_tensors[(*nt)++];
     memset(t, 0, sizeof(*t));
-    t->name.ptr = (const uint8_t *)name;
+    t->name.ptr = name;
     t->name.len = strlen(name);
     t->type = type;
     t->ndim = ndim;
@@ -29905,19 +29905,11 @@ static void ds4_test_dspark_sidecar_model(ds4_model *m, int mode) {
     m->tensors = ds4_sidecar_tensors;
 }
 
-/* Directory size for a mode: 25 per stage plus the fixed extras plus
- * the mode-dependent markov entries. Mirrors the published artifact's
- * 81-tensor count in the actual-combination mode. */
-static int ds4_sidecar_directory_size(int mode) {
-    int n = 3 * 25 + 2 + 1 + 1; /* blocks + main_* + norm + confidence */
-    if (mode == 2) return n;
-    if (mode == 6) return n + 4; /* canonical pair + alternate pair */
-    return n + 2;
-}
-
-static int ds4_test_dspark_sidecar_defects(int mode, bool *family_ok) {
+static int ds4_test_dspark_sidecar_defects(int mode, bool *family_ok,
+                                          uint64_t *n_tensors) {
     ds4_model m;
     ds4_test_dspark_sidecar_model(&m, mode);
+    if (n_tensors) *n_tensors = m.n_tensors;
     ds4_dspark_summary s = model_dspark_summary(&m);
     bool compat = support_model_checkpoint_compatible(&m);
     if (family_ok) *family_ok = compat;
@@ -29931,27 +29923,28 @@ static int ds4_test_dspark_sidecar_defects(int mode, bool *family_ok) {
 bool ds4_test_dspark_v41_sidecar_naming(void) {
     const ds4_shape saved = g_ds4_shape;
     bool family_ok = false;
+    uint64_t actual_tensors = 0;
     g_ds4_shape = DS4_SHAPE_FLASH41;
     bool ok =
         /* Canonical converter naming binds cleanly. */
-        ds4_test_dspark_sidecar_defects(0, &family_ok) == 0 && family_ok &&
+        ds4_test_dspark_sidecar_defects(0, &family_ok, NULL) == 0 && family_ok &&
         /* Published embed/head alternates bind cleanly with this patch. */
-        ds4_test_dspark_sidecar_defects(1, &family_ok) == 0 && family_ok &&
+        ds4_test_dspark_sidecar_defects(1, &family_ok, NULL) == 0 && family_ok &&
         /* Missing markov tensors refuse (missing_tensors > 0). */
-        ds4_test_dspark_sidecar_defects(2, &family_ok) > 0 && family_ok &&
+        ds4_test_dspark_sidecar_defects(2, &family_ok, NULL) > 0 && family_ok &&
         /* Missing family key accepted by this branch (#1299). */
-        ds4_test_dspark_sidecar_defects(3, &family_ok) == 0 && family_ok &&
+        ds4_test_dspark_sidecar_defects(3, &family_ok, NULL) == 0 && family_ok &&
         /* The ACTUAL artifact combination binds cleanly: no family key,
          * alternate names, real types, real noise id, and exactly the
          * published 81-tensor directory. */
-        ds4_test_dspark_sidecar_defects(4, &family_ok) == 0 && family_ok &&
-        ds4_sidecar_directory_size(4) == 81 &&
+        ds4_test_dspark_sidecar_defects(4, &family_ok, &actual_tensors) == 0 &&
+        family_ok && actual_tensors == 81 &&
         /* Wrong alternate dimensions refuse (invalid_tensors > 0). */
-        ds4_test_dspark_sidecar_defects(5, &family_ok) > 0 && family_ok &&
+        ds4_test_dspark_sidecar_defects(5, &family_ok, NULL) > 0 && family_ok &&
         /* Both variants present with wrong-dimension alternates: the
          * canonical pair must be chosen (binding the alternates would
          * trip invalid_tensors). */
-        ds4_test_dspark_sidecar_defects(6, &family_ok) == 0 && family_ok;
+        ds4_test_dspark_sidecar_defects(6, &family_ok, NULL) == 0 && family_ok;
     g_ds4_shape = saved;
     return ok;
 }
